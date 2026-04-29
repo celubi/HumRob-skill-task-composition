@@ -1,0 +1,48 @@
+# --- Ignora tutto cio' che sta fuori da lfd_pipeline/ ---
+# (paper PDF, cartelle bk/trash/videos, scripts/src non destinati alla
+#  pubblicazione, .claude, README locale, ecc.)
+/*
+
+# Eccezioni: traccia il .gitignore stesso e il package lfd_pipeline.
+!/.gitignore
+!/lfd_pipeline/
+
+# --- Dentro lfd_pipeline: ignora tutte le cartelle "dati" ---
+# CSV registrati / preprocessati / generati e modelli addestrati: specifici
+# del setup locale, non parte del codice da pubblicare.
+/lfd_pipeline/demonstrations/
+/lfd_pipeline/preprocessed_demonstrations/
+/lfd_pipeline/bc_preprocessed_demonstrations/
+/lfd_pipeline/dmp_preprocessed_demonstrations/
+/lfd_pipeline/gmm_preprocessed_demonstrations/
+/lfd_pipeline/recorded_executions/
+/lfd_pipeline/evaluation_results/
+/lfd_pipeline/generalization_results/
+/lfd_pipeline/trained_models/
+
+# Output della calibrazione hand-eye (specifici del setup, non codice).
+/lfd_pipeline/utilities/calib_imgs/
+/lfd_pipeline/utilities/T_ee_cam.npz
+/lfd_pipeline/utilities/T_ee_cam.yaml
+/lfd_pipeline/utilities/calib_poses.json
+
+# --- Python / IDE / OS (validi ovunque, dentro lfd_pipeline) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Artefatti ROS tipici (per sicurezza, se mai dovessero comparire annidati).
+build/
+install/
+log/
