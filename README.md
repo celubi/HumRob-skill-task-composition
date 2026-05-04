@@ -6,4 +6,4 @@ LfD pipeline that compares three motion encoders — **Behavioral Cloning (BC)**
 
 ## Demonstration video
 
-Watch the experiments here: **[YouTube demo (placeholder)](https://youtu.be/REPLACE_ME)**
+Watch the experiments here: **[YouTube VIDEO](https://youtu.be/grHvkG_HBF4)**
