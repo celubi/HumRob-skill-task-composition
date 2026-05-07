@@ -33,9 +33,10 @@ from config.robot_config import (  # noqa: E402
     EXEC_DEFAULT_ACC,
     EXEC_DEFAULT_BLEND_RADIUS,
     EXEC_DEFAULT_SPEED,
-    GRASP_OFFSET_Z_M,
     GRIPPER_OPEN_POS,
     HOME_JOINT_DEG,
+    PLACE_JOINT_DEG,
+    PLACE_OFFSET_Z_M,
     REALSENSE_FPS,
     REALSENSE_HEIGHT,
     REALSENSE_WIDTH,
@@ -51,7 +52,7 @@ from inference.robot.arm_io import (  # noqa: E402
     shutdown,
 )
 from inference.vision.live_aruco import LiveAruco  # noqa: E402
-from inference.vision.tag_to_grasp import grasp_pose_from_tag  # noqa: E402
+from inference.vision.tag_to_grasp import place_pose_from_tag  # noqa: E402
 
 
 def get_current_xyzrpy(arm) -> list[float]:
@@ -76,9 +77,9 @@ def parse_args() -> argparse.Namespace:
                    help=f"ID ArUco del punto di place (default: {ARUCO_OBJECT_ID}).")
     p.add_argument("--marker-len", type=float, default=ARUCO_MARKER_LEN_M,
                    help=f"Lato fisico del marker [m] (default: {ARUCO_MARKER_LEN_M}).")
-    p.add_argument("--grasp-offset-z", type=float, default=GRASP_OFFSET_Z_M,
-                   help="Offset lungo l'asse z del tag [m] (default: "
-                        f"{GRASP_OFFSET_Z_M}).")
+    p.add_argument("--place-offset-z", type=float, default=PLACE_OFFSET_Z_M,
+                   help="Offset lungo +Z del tag [m] per la posa di place "
+                        f"(default: {PLACE_OFFSET_Z_M}).")
     p.add_argument("--duration-scale", type=float, default=1.0,
                    help="Riscala la durata della traiettoria (1.0 = come demo).")
     p.add_argument("--exec-speed", type=float, default=EXEC_DEFAULT_SPEED,
@@ -173,88 +174,74 @@ def main() -> int:
             if T_base_tag is None:
                 raise SystemExit(f"[place] marker id={args.marker_id} non rilevato.")
 
-            goal_xyzrpy = grasp_pose_from_tag(T_base_tag,
-                                              offset_z_m=args.grasp_offset_z)
+            goal_xyzrpy = place_pose_from_tag(T_base_tag,
+                                              offset_z_m=args.place_offset_z)
             print(f"[place] tag center (m): {T_base_tag[:3, 3].round(4).tolist()}")
             print(f"[place] place goal     : "
                   f"xyz={[round(v, 4) for v in goal_xyzrpy[:3]]}  "
                   f"rpy={[round(v, 4) for v in goal_xyzrpy[3:]]} (rad)")
-
-            # modalita' manuale: l'utente porta il braccio nella posa iniziale.
-            print("[place] passaggio in modalita' manuale (gravity compensation).")
-            try:
-                arm.clean_warn()
-            except Exception:
-                pass
-            arm.set_mode(2)
-            arm.set_state(0)
-            time.sleep(0.5)
-
-            input("[place] posiziona MANUALMENTE il braccio nella posa di partenza "
-                  "del place, poi premi INVIO...")
-
-            print("[place] ritorno in modalita' position.")
-            arm.set_mode(0)
-            arm.set_state(0)
-            time.sleep(0.5)
-
-            start_xyzrpy = get_current_xyzrpy(arm)
-            print(f"[place] start xyz   : {[round(v, 4) for v in start_xyzrpy[:3]]}  "
-                  f"rpy={[round(v, 4) for v in start_xyzrpy[3:]]} (rad)")
-
-            gen = DMPGenerator(args.model)
-            traj = gen.generate(
-                start_xyzrpy=start_xyzrpy,
-                goal_xyzrpy=goal_xyzrpy,
-                duration_scale=args.duration_scale,
-            )
-            print(f"[place] traj N={traj.n}  T={traj.t[-1]:.2f}s  "
-                  f"dt={(traj.t[1]-traj.t[0]):.3f}s  "
-                  f"grip={'si' if traj.grip is not None else 'no'}")
-            print(f"[place] endpoint xyz   : {traj.xyz_m[-1].round(4).tolist()}")
-
-            if args.save_csv is not None:
-                save_trajectory_csv(args.save_csv, traj)
-                print(f"[place] traiettoria salvata in {args.save_csv}")
-
-            preview = None
-            if args.preview3d:
-                from inference.vision.preview3d import RobotPreview3D
-                print("[place] apro la preview 3D (PyBullet)...")
-                code, q_now_deg = arm.get_servo_angle(is_radian=False)
-                q_init = (list(q_now_deg[:6]) if code == 0 and q_now_deg is not None
-                          else list(HOME_JOINT_DEG))
-                preview = RobotPreview3D(q_init,
-                                         animate=args.preview3d_animate)
-                preview.show_trajectory(traj, goal_xyzrpy=goal_xyzrpy)
-                preview.wait_for_user(
-                    "[3D] ispeziona la traiettoria. INVIO per procedere... ")
-
-            try:
-                if args.no_execute:
-                    print("[place] --no-execute attivo: salto l'esecuzione.")
-                    if preview is None:
-                        input("[place] INVIO per chiudere la preview...")
-                else:
-                    print("[place] esecuzione tra 2s ...")
-                    time.sleep(2.0)
-                    if args.open_after_traj:
-                        print("[place] --open-after-traj: ignoro il gripper "
-                              "decodificato dalla traiettoria.")
-                        traj.grip = None
-                    execute_trajectory(arm, traj,
-                                       speed=args.exec_speed,
-                                       acc=args.exec_acc,
-                                       blend_radius=args.blend_radius)
-                    if args.open_after_traj:
-                        print(f"[place] apro il gripper a {GRIPPER_OPEN_POS} "
-                              "(post-traiettoria) per rilasciare l'oggetto.")
-                        arm.set_gripper_position(GRIPPER_OPEN_POS, wait=True)
-            finally:
-                if preview is not None:
-                    preview.close()
         finally:
             live.stop()
+
+        # 2) movimento ai giunti nella posa di partenza del place.
+        print(f"[place] PLACE_JOINT_DEG: {PLACE_JOINT_DEG}")
+        go_home(arm, PLACE_JOINT_DEG)
+
+        start_xyzrpy = get_current_xyzrpy(arm)
+        print(f"[place] start xyz   : {[round(v, 4) for v in start_xyzrpy[:3]]}  "
+              f"rpy={[round(v, 4) for v in start_xyzrpy[3:]]} (rad)")
+
+        gen = DMPGenerator(args.model)
+        traj = gen.generate(
+            start_xyzrpy=start_xyzrpy,
+            goal_xyzrpy=goal_xyzrpy,
+            duration_scale=args.duration_scale,
+        )
+        print(f"[place] traj N={traj.n}  T={traj.t[-1]:.2f}s  "
+              f"dt={(traj.t[1]-traj.t[0]):.3f}s  "
+              f"grip={'si' if traj.grip is not None else 'no'}")
+        print(f"[place] endpoint xyz   : {traj.xyz_m[-1].round(4).tolist()}")
+
+        if args.save_csv is not None:
+            save_trajectory_csv(args.save_csv, traj)
+            print(f"[place] traiettoria salvata in {args.save_csv}")
+
+        preview = None
+        if args.preview3d:
+            from inference.vision.preview3d import RobotPreview3D
+            print("[place] apro la preview 3D (PyBullet)...")
+            code, q_now_deg = arm.get_servo_angle(is_radian=False)
+            q_init = (list(q_now_deg[:6]) if code == 0 and q_now_deg is not None
+                      else list(HOME_JOINT_DEG))
+            preview = RobotPreview3D(q_init,
+                                     animate=args.preview3d_animate)
+            preview.show_trajectory(traj, goal_xyzrpy=goal_xyzrpy)
+            preview.wait_for_user(
+                "[3D] ispeziona la traiettoria. INVIO per procedere... ")
+
+        try:
+            if args.no_execute:
+                print("[place] --no-execute attivo: salto l'esecuzione.")
+                if preview is None:
+                    input("[place] INVIO per chiudere la preview...")
+            else:
+                print("[place] esecuzione tra 2s ...")
+                time.sleep(2.0)
+                if args.open_after_traj:
+                    print("[place] --open-after-traj: ignoro il gripper "
+                          "decodificato dalla traiettoria.")
+                    traj.grip = None
+                execute_trajectory(arm, traj,
+                                   speed=args.exec_speed,
+                                   acc=args.exec_acc,
+                                   blend_radius=args.blend_radius)
+                if args.open_after_traj:
+                    print(f"[place] apro il gripper a {GRIPPER_OPEN_POS} "
+                          "(post-traiettoria) per rilasciare l'oggetto.")
+                    arm.set_gripper_position(GRIPPER_OPEN_POS, wait=True)
+        finally:
+            if preview is not None:
+                preview.close()
     finally:
         shutdown(arm)
     return 0

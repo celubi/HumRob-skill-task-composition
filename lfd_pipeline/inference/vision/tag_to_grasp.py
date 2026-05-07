@@ -57,3 +57,35 @@ def grasp_pose_from_tag(T_base_tag: np.ndarray,
     roll, pitch, yaw = _R_to_rpy_zyx(R_g)
     return [float(p_g[0]), float(p_g[1]), float(p_g[2]),
             roll, pitch, yaw]
+
+
+def place_pose_from_tag(T_base_tag: np.ndarray,
+                        offset_z_m: float = 0.20) -> list[float]:
+    """Posa target del gripper per il PLACE in formato [x,y,z, r,p,y] (m, rad).
+
+    Vincoli geometrici (frame BASE):
+        - x_g = +Z_t   (asse +x del gripper allineato a +Z del tag)
+        - z_g = +X_t   (asse +z del gripper allineato a +X del tag)
+        - y_g = z_g x x_g  (destrorso, ortonormale)
+    Posizione: centro del tag spostato di ``offset_z_m`` lungo +Z del tag
+    (default 20 cm sopra il tag, lungo il suo asse Z uscente).
+    """
+    R_t = np.asarray(T_base_tag, float)[:3, :3]
+    p_t = np.asarray(T_base_tag, float)[:3, 3]
+
+    x_t = R_t[:, 0]
+    z_t = R_t[:, 2]
+
+    x_g = z_t / np.linalg.norm(z_t)
+    z_g = x_t / np.linalg.norm(x_t)
+    # ri-ortogonalizzazione di z_g rispetto a x_g
+    z_g = z_g - np.dot(z_g, x_g) * x_g
+    z_g = z_g / np.linalg.norm(z_g)
+    y_g = np.cross(z_g, x_g)
+
+    R_g = np.column_stack([x_g, y_g, z_g])
+    p_g = p_t + offset_z_m * (z_t / np.linalg.norm(z_t))
+
+    roll, pitch, yaw = _R_to_rpy_zyx(R_g)
+    return [float(p_g[0]), float(p_g[1]), float(p_g[2]),
+            roll, pitch, yaw]

@@ -16,7 +16,8 @@ ROBOT_IP = "192.168.1.221"
 
 # Configurazione "home" ai giunti (gradi). Modifica i valori a piacere.
 HOME_JOINT_DEG = [-97.8, 23.3, -83.7, -323, 109.1, 213]
-#HOME_JOINT_DEG = [27.6, 39.9, -49.1, -151.6, 84.3, 174.1]
+# PLACE_JOINT_DEG = [27.6, 39.9, -49.1, -151.6, 84.3, 174.1]
+PLACE_JOINT_DEG = [-57, 15.2, -32.7, -237.3, 82.9, 195.4]
 
 # --- Recorder ---
 DEFAULT_RECORD_RATE_HZ = 50.0
@@ -87,7 +88,7 @@ ARUCO_DICT_NAME = "DICT_6X6_50"
 ARUCO_MARKER_LEN_M = 0.030
 
 # ID marker dell'oggetto (default per il task pick).
-ARUCO_OBJECT_ID = 3
+ARUCO_OBJECT_ID = 2
 
 # Calibrazione hand-in-eye: T_ee^cam (gripper -> camera) in metri.
 # Stessa matrice usata in lfd_evaluate/generalization_pick.py.
@@ -105,4 +106,11 @@ T_EE_CAM = _np.array([
 # Offset lungo l'asse z del tag per portare il centro del marker tra le pinze
 # del gripper (positivo = piu' in alto rispetto al tag, in metri).
 GRASP_OFFSET_Z_M = -0.02
+
+# Offset lungo +Z del tag per la posa di place (in metri). Il gripper si
+# posiziona con +x allineato a +Z del tag e a questa distanza lungo +Z.
+PLACE_OFFSET_Z_M = 0.2
+
+# Offset lungo z del tag per la primitiva POUR (in metri).
+POUR_OFFSET_Z_M = -0.04
 

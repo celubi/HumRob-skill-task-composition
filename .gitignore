@@ -19,6 +19,7 @@
 /lfd_pipeline/evaluation_results/
 /lfd_pipeline/generalization_results/
 /lfd_pipeline/trained_models/
+/lfd_pipeline/reproduction_results/
 
 # Output della calibrazione hand-eye (specifici del setup, non codice).
 /lfd_pipeline/utilities/calib_imgs/

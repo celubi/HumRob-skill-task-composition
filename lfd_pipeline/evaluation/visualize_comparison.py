@@ -418,7 +418,7 @@ def parse_args() -> argparse.Namespace:
                    help="Numero di terne TCP campionate per traiettoria nel "
                         "plot 3D (start ed end sempre inclusi). 0 disattiva. "
                         "Default: 6.")
-    p.add_argument("--frame-len", type=float, default=0.10,
+    p.add_argument("--frame-len", type=float, default=0.02,
                    help="Lunghezza degli assi delle terne TCP [m] (default: 0.03).")
     return p.parse_args()
 

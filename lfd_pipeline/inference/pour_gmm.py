@@ -37,7 +37,8 @@ from config.robot_config import (  # noqa: E402
     EXEC_DEFAULT_ACC,
     EXEC_DEFAULT_BLEND_RADIUS,
     EXEC_DEFAULT_SPEED,
-    GRASP_OFFSET_Z_M,
+    POUR_OFFSET_Z_M,
+    GRIPPER_CLOSED_POS,
     GRIPPER_OPEN_POS,
     HOME_JOINT_DEG,
     REALSENSE_FPS,
@@ -60,13 +61,13 @@ from inference.vision.live_aruco import LiveAruco  # noqa: E402
 
 # Offset specifici della primitiva POUR (lungo gli assi del tag, in metri).
 POUR_OFFSET_X_M = 0.20
-POUR_OFFSET_Y_M = 0.15
+POUR_OFFSET_Y_M = 0.0
 # Offset del goal rispetto allo start lungo y_t: rompe la degenerazione
 # start==goal che fa collassare il forcing DMP e mediare a zero le azioni BC.
 POUR_GOAL_OFFSET_Y_M = -0.02
 # Rotazione del goal attorno a +Z del tag rispetto allo start (gradi).
 # Coerente con la demo: il polso parte verticale e finisce inclinato.
-POUR_GOAL_ROT_Z_DEG = -120.0
+POUR_GOAL_ROT_Z_DEG = -140.0
 
 
 def pour_pose_from_tag(T_base_tag: np.ndarray,
@@ -133,8 +134,8 @@ def parse_args() -> argparse.Namespace:
                    help=f"Offset lungo x_t [m] (default: {POUR_OFFSET_X_M}).")
     p.add_argument("--pour-offset-y", type=float, default=POUR_OFFSET_Y_M,
                    help=f"Offset lungo y_t [m] (default: {POUR_OFFSET_Y_M}).")
-    p.add_argument("--grasp-offset-z", type=float, default=GRASP_OFFSET_Z_M,
-                   help=f"Offset lungo z_t [m] (default: {GRASP_OFFSET_Z_M}).")
+    p.add_argument("--pour-offset-z", type=float, default=POUR_OFFSET_Z_M,
+                   help=f"Offset lungo z_t [m] (default: {POUR_OFFSET_Z_M}).")
     p.add_argument("--goal-offset-y", type=float, default=POUR_GOAL_OFFSET_Y_M,
                    help=f"Offset goal-vs-start lungo y_t [m] "
                         f"(default: {POUR_GOAL_OFFSET_Y_M}).")
@@ -200,7 +201,7 @@ def main() -> int:
     print(f"[gmm-pour] marker id : {args.marker_id}  (lato {args.marker_len*1000:.0f} mm,"
           f" dict={ARUCO_DICT_NAME})")
     print(f"[gmm-pour] offset    : dx={args.pour_offset_x:+.3f} m  "
-          f"dy={args.pour_offset_y:+.3f} m  dz={args.grasp_offset_z:+.3f} m "
+          f"dy={args.pour_offset_y:+.3f} m  dz={args.pour_offset_z:+.3f} m "
           "(assi del tag)")
     print(f"[gmm-pour] goal delta: dy={args.goal_offset_y:+.3f} m  "
           f"rot_z={args.goal_rot_z_deg:+.1f} deg (rispetto allo start)")
@@ -212,7 +213,7 @@ def main() -> int:
         go_home(arm, HOME_JOINT_DEG)
 
         # 2) gripper aperto come stato di partenza noto
-        open_gripper(arm, GRIPPER_OPEN_POS)
+        open_gripper(arm, GRIPPER_CLOSED_POS)
 
         # 3) live preview
         live = LiveAruco(
@@ -245,14 +246,14 @@ def main() -> int:
                 T_base_tag,
                 offset_x_m=args.pour_offset_x,
                 offset_y_m=args.pour_offset_y,
-                offset_z_m=args.grasp_offset_z,
+                offset_z_m=args.pour_offset_z,
                 rot_z_deg=0.0,
             )
             goal_xyzrpy = pour_pose_from_tag(
                 T_base_tag,
                 offset_x_m=args.pour_offset_x,
                 offset_y_m=args.pour_offset_y + args.goal_offset_y,
-                offset_z_m=args.grasp_offset_z,
+                offset_z_m=args.pour_offset_z,
                 rot_z_deg=args.goal_rot_z_deg,
             )
             print(f"[gmm-pour] tag center (m): {T_base_tag[:3, 3].round(4).tolist()}")
