@@ -81,7 +81,8 @@ class DMP1D:
         return float(scale)
 
     # --- fit --------------------------------------------------------------
-    def fit(self, y: np.ndarray, dy: np.ndarray, ddy: np.ndarray) -> "DMP1D":
+    def fit(self, y: np.ndarray, dy: np.ndarray, ddy: np.ndarray,
+            use_scaling: bool = True) -> "DMP1D":
         """Locally-Weighted Regression per BF (Ijspeert 2013).
 
         Per ogni basis function i:
@@ -90,6 +91,18 @@ class DMP1D:
 
         Disaccoppia i pesi e li mantiene limitati anche con BF strette
         (a differenza della LS globale).
+
+        Parametri
+        ---------
+        use_scaling : bool
+            Se True (default), abilita il diagonal scaling Ijspeert:
+            f_norm = f_target / (g - y0). Se False, fitta la forzante in
+            unita' assolute (f_norm = f_target). Va usato per assi
+            quasi-statici nelle dimostrazioni (|g - y0| ~ 0), dove la
+            divisione per (g - y0) genererebbe pesi enormi che, in
+            inferenza, vengono moltiplicati per (g_new - y0_new) di
+            ampiezza arbitraria, producendo forzanti spurie e traiettorie
+            instabili. Vedi Park 2008, Pastor 2009, Ijspeert 2013 III-C.
         """
         y = np.asarray(y, dtype=float)
         dy = np.asarray(dy, dtype=float)
@@ -107,8 +120,14 @@ class DMP1D:
         f_target = (self.tau ** 2) * ddy - self.alpha_z * (
             self.beta_z * (self.g - y) - self.tau * dy
         )
-        self._scale_demo = self._safe_scale(self.g - self.y0)
-        f_norm = f_target / self._scale_demo     # (N,)
+        if use_scaling:
+            self._scale_demo = self._safe_scale(self.g - self.y0)
+            f_norm = f_target / self._scale_demo     # (N,)
+        else:
+            # forzante in unita' assolute: nessuna divisione, nessuna
+            # moltiplicazione per (g - y0) in rollout.
+            self._scale_demo = 1.0
+            f_norm = f_target
 
         # LWR closed-form, per BF
         s_col = s[:, None]                       # (N, 1)

@@ -36,11 +36,32 @@ from config.robot_config import (  # noqa: E402
     DMP_DEFAULT_ALPHA_Z,
     DMP_DEFAULT_N_BFS,
     DMP_PREPROCESSED_ROOT,
+    DMP_STATIC_AXIS_POS_THRESH,
+    DMP_STATIC_AXIS_ROT_THRESH,
     TRAINED_MODELS_ROOT,
 )
 from learning.dmp.dmp_model import DMP1D, make_basis  # noqa: E402
 
 Y_COLS = ["x", "y", "z", "rx", "ry", "rz"]
+# soglie per asse: posizione (m) per x,y,z; rotazione (rad) per rx,ry,rz
+_AXIS_STATIC_THRESH = np.array([
+    DMP_STATIC_AXIS_POS_THRESH, DMP_STATIC_AXIS_POS_THRESH, DMP_STATIC_AXIS_POS_THRESH,
+    DMP_STATIC_AXIS_ROT_THRESH, DMP_STATIC_AXIS_ROT_THRESH, DMP_STATIC_AXIS_ROT_THRESH,
+], dtype=float)
+
+
+def decide_use_scaling(y0_list: np.ndarray, g_list: np.ndarray) -> np.ndarray:
+    """Per ogni asse decide se applicare il diagonal scaling Ijspeert.
+
+    Criterio: l'asse e' "attivo" (use_scaling=True) se l'ampiezza media
+    dello spostamento end-to-end nelle dimostrazioni supera la soglia
+    fissata in robot_config (separata per posizione e orientazione).
+    Per gli assi statici si fitta la forzante in unita' assolute, evitando
+    la divisione per (g_demo - y0_demo) ~ 0 che genera pesi enormi e
+    rollout instabili con target generici (Park 2008, Pastor 2009).
+    """
+    amp = np.mean(np.abs(np.asarray(g_list) - np.asarray(y0_list)), axis=0)  # (6,)
+    return amp > _AXIS_STATIC_THRESH, amp
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +78,14 @@ def load_dataset(npz_path: Path):
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
-def fit_mean_weights(Y_list, dY_list, ddY_list, n_bfs, alpha_z, alpha_s, dt, T):
-    """Fit per-demo, poi media dei pesi. Ritorna W (6, n_bfs)."""
+def fit_mean_weights(Y_list, dY_list, ddY_list, n_bfs, alpha_z, alpha_s, dt, T,
+                     use_scaling: np.ndarray):
+    """Fit per-demo, poi media dei pesi. Ritorna W (6, n_bfs).
+
+    ``use_scaling`` (6,) bool: per asse, se True usa il diagonal scaling
+    Ijspeert (f_norm = f_target / (g - y0)); se False fitta la forzante
+    in unita' assolute (per assi quasi-statici nelle dimostrazioni).
+    """
     K = len(Y_list)
     W_per_demo = np.zeros((K, 6, n_bfs), dtype=float)
     scales = np.zeros((K, 6), dtype=float)
@@ -71,7 +98,8 @@ def fit_mean_weights(Y_list, dY_list, ddY_list, n_bfs, alpha_z, alpha_s, dt, T):
         for d in range(6):
             dmp = DMP1D(n_bfs=n_bfs, alpha_z=alpha_z, alpha_s=alpha_s,
                         dt=dt, T=T)
-            dmp.fit(Y[:, d], dY[:, d], ddY[:, d])
+            dmp.fit(Y[:, d], dY[:, d], ddY[:, d],
+                    use_scaling=bool(use_scaling[d]))
             W_per_demo[k, d, :] = dmp.w
             scales[k, d] = dmp._scale_demo
             if abs(Y[-1, d] - Y[0, d]) < 1e-6:
@@ -82,7 +110,8 @@ def fit_mean_weights(Y_list, dY_list, ddY_list, n_bfs, alpha_z, alpha_s, dt, T):
     return W, W_per_demo, W_std, scales, degenerate
 
 
-def fit_concat_ls(Y_list, dY_list, ddY_list, n_bfs, alpha_z, alpha_s, dt, T):
+def fit_concat_ls(Y_list, dY_list, ddY_list, n_bfs, alpha_z, alpha_s, dt, T,
+                  use_scaling: np.ndarray):
     """Multi-demo Locally-Weighted Regression per BF.
 
     Per ogni dimensione d e ogni BF i:
@@ -91,6 +120,10 @@ def fit_concat_ls(Y_list, dY_list, ddY_list, n_bfs, alpha_z, alpha_s, dt, T):
 
     Equivale a fondere in un'unica regressione locale i contributi di tutte
     le demo, mantenendo i pesi limitati anche con BF strette.
+
+    ``use_scaling`` (6,) bool: per asse decide se la forzante target viene
+    normalizzata da (g - y0) (assi attivi) o lasciata in unita' assolute
+    (assi quasi-statici nelle dimostrazioni).
     """
     from learning.dmp.dmp_model import psi_matrix
     proto = DMP1D(n_bfs=n_bfs, alpha_z=alpha_z, alpha_s=alpha_s, dt=dt, T=T)
@@ -113,7 +146,10 @@ def fit_concat_ls(Y_list, dY_list, ddY_list, n_bfs, alpha_z, alpha_s, dt, T):
         den += (Psi * (s_col ** 2)).sum(axis=0)
 
         for d in range(6):
-            scale = DMP1D._safe_scale(Y[-1, d] - Y[0, d])
+            if use_scaling[d]:
+                scale = DMP1D._safe_scale(Y[-1, d] - Y[0, d])
+            else:
+                scale = 1.0
             scales[k, d] = scale
             if abs(Y[-1, d] - Y[0, d]) < 1e-6:
                 degenerate.append((k, Y_COLS[d]))
@@ -198,17 +234,25 @@ def main() -> int:
     print(f"  hparams : n_bfs={args.n_bfs}, alpha_z={args.alpha_z}, "
           f"alpha_s={args.alpha_s}, beta_z={args.alpha_z/4.0}")
 
+    # Decisione per asse: diagonal scaling Ijspeert vs forzante assoluta.
+    use_scaling, axis_amp = decide_use_scaling(y0_list, g_list)
+    print("  axis scaling decision (|g-y0| medio):")
+    for d, name in enumerate(Y_COLS):
+        thr = _AXIS_STATIC_THRESH[d]
+        mode = "diagonal-scaling" if use_scaling[d] else "ABSOLUTE (asse statico nelle demo)"
+        print(f"    {name:>4s}: amp_mean={axis_amp[d]:.3e} (thr={thr:.2e}) -> {mode}")
+
     if args.method == "mean-weights":
         W, W_per_demo, W_std, scales, degenerate = fit_mean_weights(
             Y_list, dY_list, ddY_list,
             n_bfs=args.n_bfs, alpha_z=args.alpha_z, alpha_s=args.alpha_s,
-            dt=dt, T=T_mean,
+            dt=dt, T=T_mean, use_scaling=use_scaling,
         )
     else:
         W, scales, degenerate = fit_concat_ls(
             Y_list, dY_list, ddY_list,
             n_bfs=args.n_bfs, alpha_z=args.alpha_z, alpha_s=args.alpha_s,
-            dt=dt, T=T_mean,
+            dt=dt, T=T_mean, use_scaling=use_scaling,
         )
         W_per_demo = None
         W_std = None
@@ -274,6 +318,8 @@ def main() -> int:
         y_columns=np.asarray(Y_COLS),
         demo_files=demo_files,
         scales=scales,           # (K, 6)
+        use_scaling=use_scaling.astype(bool),  # (6,) maschera diagonal-scaling
+        axis_amp=axis_amp,                     # (6,) |g-y0| medio per asse
     )
     if W_per_demo is not None:
         save_dict["W_per_demo"] = W_per_demo

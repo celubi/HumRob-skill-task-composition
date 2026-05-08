@@ -57,6 +57,15 @@ DMP_DEFAULT_N_BFS = 100
 DMP_DEFAULT_ALPHA_Z = 25.0
 DMP_DEFAULT_ALPHA_S = 1.0
 DMP_DEFAULT_TAU = 1.0
+# Soglia (per asse) sotto cui un asse e' considerato "quasi statico" nelle
+# dimostrazioni: per quelle dimensioni il diagonal scaling Ijspeert
+# f = (g - y0) * f_norm viene disabilitato (si fitta la forzante in unita'
+# assolute) per evitare che pesi enormi - dovuti a |g_demo - y0_demo| ~ 0 -
+# generino traiettorie folli quando l'inferenza usa target generici con
+# spostamento non trascurabile. Soglie distinte per posizione (m) e
+# orientazione (rad). Vedi Park 2008 / Pastor 2009 / Ijspeert 2013 III-C.
+DMP_STATIC_AXIS_POS_THRESH = 0.02   # m  (~2 cm)
+DMP_STATIC_AXIS_ROT_THRESH = 0.10   # rad (~5.7 deg)
 
 # --- BC ---
 # Cartella per gli output del preprocessing BC-specifico.

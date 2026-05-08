@@ -127,6 +127,14 @@ class DMPGenerator:
         self.g_mean = np.asarray(d["g_mean"], float)    # (6,)
         self.s_ref = d["s_ref"] if "s_ref" in d.files else None
         self.grip_ref = d["grip_ref"] if "grip_ref" in d.files else np.array([])
+        # Maschera per asse: True -> diagonal scaling Ijspeert
+        # f = (g - y0) * f_norm; False -> forzante in unita' assolute
+        # f = f_norm. Il default a True mantiene compatibilita' coi modelli
+        # legacy senza la maschera salvata.
+        if "use_scaling" in d.files:
+            self.use_scaling = np.asarray(d["use_scaling"], dtype=bool)
+        else:
+            self.use_scaling = np.ones(6, dtype=bool)
 
     # ------------------------------------------------------------------ API
     def generate(
@@ -159,12 +167,24 @@ class DMPGenerator:
         s_grid = np.exp(-self.alpha_s * t_grid / max(tau, 1e-9))
 
         # rollout via Eulero forward sui 6 DMP indipendenti (vettoriale)
-        scale_new = g - y0
-        # eps-guard per dimensioni "piatte"
+        # Per gli assi "attivi" (use_scaling=True) applica il diagonal scaling
+        # Ijspeert: f = (g_new - y0_new) * f_norm.
+        # Per gli assi "statici" nelle demo (use_scaling=False) la forzante
+        # e' stata fittata in unita' assolute, quindi viene applicata
+        # direttamente: f = f_norm. Cosi' un asse che le demo non hanno
+        # mosso non genera moto spurio se in inferenza il target lo sposta
+        # (la convergenza verso g e' garantita dal termine elastico
+        # alpha_z * beta_z * (g - y) della transformation system).
+        scale_eff = np.where(self.use_scaling, g - y0, 1.0)
+        # eps-guard solo dove serve (assi attivi con scala numericamente nulla)
         eps = 1e-8
-        scale_new = np.where(np.abs(scale_new) < eps,
-                             np.where(scale_new == 0.0, eps, np.sign(scale_new) * eps),
-                             scale_new)
+        active_tiny = self.use_scaling & (np.abs(scale_eff) < eps)
+        if np.any(active_tiny):
+            scale_eff = np.where(
+                active_tiny,
+                np.where(scale_eff == 0.0, eps, np.sign(scale_eff) * eps),
+                scale_eff,
+            )
 
         Y = np.zeros((steps, 6), float)
         dY = np.zeros((steps, 6), float)
@@ -178,7 +198,7 @@ class DMPGenerator:
             denom = psi.sum() + 1e-12
             # f_norm per ognuna delle 6 dim: (W @ psi) * s / denom
             f_norm = (self.W @ psi) * (s / denom)             # (6,)
-            f = scale_new * f_norm                             # (6,)
+            f = scale_eff * f_norm                             # (6,)
             ddY_i = (alpha_z * (beta_z * (g - Y[i - 1]) - tau * dY[i - 1]) + f) / (tau ** 2)
             dY[i] = dY[i - 1] + ddY_i * self.dt
             Y[i] = Y[i - 1] + dY[i] * self.dt
