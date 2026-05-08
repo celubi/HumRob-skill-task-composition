@@ -50,7 +50,6 @@ from config.robot_config import (  # noqa: E402
     BC_PREPROCESSED_ROOT,
     PREPROCESSED_ROOT,
 )
-from preprocessing.preprocess_demos import load_qref_sidecar  # noqa: E402
 
 # colonne attese nel CSV di common-preprocessing
 COMMON_HEADER = ["t", "x", "y", "z", "qx", "qy", "qz", "qw",
@@ -200,13 +199,6 @@ def main() -> int:
     print(f"  in : {args.in_root / args.task}")
     print(f"  out: {out_dir}")
 
-    try:
-        q_ref = load_qref_sidecar(args.in_root / args.task)
-        print(f"  q_ref : {q_ref.round(4).tolist()}")
-    except FileNotFoundError:
-        q_ref = np.array([0.0, 0.0, 0.0, 1.0], float)
-        print("  [warn] qref.json non trovato: assumo q_ref=identita'.")
-
     S_list, A_list = [], []
     grip_list, t_list = [], []
     s0_list, sT_list = [], []
@@ -291,9 +283,6 @@ def main() -> int:
         state_dim=int(I.shape[1]),
         action_dim=int(O.shape[1]),
         goal_conditioned=True,
-        # quaternione di riferimento per la ricentratura della rotazione:
-        # le componenti rx,ry,rz dello stato sono log(q_ref^{-1} * q_abs).
-        q_ref=np.asarray(q_ref, float),
     )
     print(f"\nDataset BC salvato: {out_npz}")
     print(f"  K_demos={len(inputs)}  |  M_pairs={len(I)}  |  "

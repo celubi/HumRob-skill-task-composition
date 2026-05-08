@@ -147,9 +147,6 @@ def main() -> int:
     grip_ref = data["grip_ref"]
     T_mean = float(data["T_mean"])
     y_columns = list(data["y_columns"])
-    q_ref = (np.asarray(data["q_ref"], float)
-             if "q_ref" in data.files
-             else np.array([0.0, 0.0, 0.0, 1.0], float))
 
     print(f"Dataset: {dataset_path}")
     print(f"  Z shape: {Z.shape}   (colonne: s + {y_columns})")
@@ -216,9 +213,6 @@ def main() -> int:
         AIC=rep["AIC"],
         n_iter=rep["n_iter"],
         converged=rep["converged"],
-        # quaternione di riferimento per la ricomposizione della rotazione
-        # assoluta a inferenza (q_abs = q_ref * exp(r_rel)).
-        q_ref=q_ref,
     )
     print(f"\nModello salvato: {out_path}")
     return 0

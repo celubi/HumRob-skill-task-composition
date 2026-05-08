@@ -10,27 +10,14 @@ sequenza:
      - posizione (x,y,z) e gripper -> interpolazione lineare;
      - quaternione -> SLERP.
   4. Re-normalizzazione e re-applicazione della continuity dopo il resampling.
-  5. **Ricentratura della rotazione** rispetto a un quaternione di riferimento
-     ``q_ref`` (default: primo campione della prima demo del batch). Per ogni
-     campione si calcola la rotazione relativa ``q_rel = q_ref^{-1} * q_abs``
-     e si applica la log-map per ottenere ``(rx, ry, rz)``. Lavorando nel
-     frame relativo le rotazioni vivono in un intorno dell'identita': il
-     log-map e' lontano dalla singolarita' a theta=pi e non si presentano
-     piu' problemi di rami antipodali fra demo o di componenti scalari
-     quasi-degeneri sul DMP.
 
 Il CSV di output mantiene **entrambe** le rappresentazioni dell'orientazione:
   - ``qx,qy,qz,qw`` = rotazione ASSOLUTA del TCP (per replay/visualizzazione);
-  - ``rx,ry,rz``    = log-map della rotazione RELATIVA a ``q_ref``.
+  - ``rx,ry,rz``    = log-map (axis-angle) della rotazione ASSOLUTA.
 
-Il quaternione di riferimento viene persistito come sidecar JSON
-``preprocessed_demonstrations/<task>/qref.json``: i preprocess di DMP/GMM/BC
-lo leggono e lo propagano fino al modello allenato, cosicche' a inferenza
-sia possibile ri-comporre la rotazione assoluta come ``q_abs = q_ref * exp(r_rel)``.
 
 Header del CSV in uscita:
     t, x, y, z, qx, qy, qz, qw, rx, ry, rz, gripper
-    (qx..qw assoluti; rx..rz relativi a q_ref)
 
 Uso:
     python3 preprocess_demos.py --task pick
@@ -157,56 +144,12 @@ def quat_to_rotvec(quat: np.ndarray) -> np.ndarray:
     return R.from_quat(quat).as_rotvec()
 
 
-def quat_inv(q: np.ndarray) -> np.ndarray:
-    """Inverso di un quaternione unitario (qx, qy, qz, qw)."""
-    q = np.asarray(q, float)
-    out = q.copy()
-    out[..., :3] = -out[..., :3]
-    return out
-
-
-def quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    """Prodotto di Hamilton (qx, qy, qz, qw). Supporta broadcasting su (..., 4)."""
-    q1 = np.asarray(q1, float)
-    q2 = np.asarray(q2, float)
-    x1, y1, z1, w1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
-    x2, y2, z2, w2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
-    out = np.empty(np.broadcast_shapes(q1.shape, q2.shape), float)
-    out[..., 0] = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-    out[..., 1] = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-    out[..., 2] = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-    out[..., 3] = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-    return out
-
-
-def recenter_quat_stream(quat_abs: np.ndarray, q_ref: np.ndarray) -> np.ndarray:
-    """Calcola lo stream di quaternioni RELATIVI ``q_rel = q_ref^{-1} * q_abs``.
-
-    La rappresentazione relativa porta tutte le rotazioni in un intorno di
-    ``q_ref`` (quindi vicine all'identita' nel frame relativo). In log-map
-    cio' significa rotvec con norma piccola, lontana dalla singolarita' a
-    ``theta = pi``: niente piu' ambiguita' antipodale, niente collassi a
-    rotazione nulla quando si mediano demo diverse.
-    """
-    quat_abs = np.asarray(quat_abs, float)
-    if quat_abs.size == 0:
-        return quat_abs.copy()
-    q_ref_inv = quat_inv(np.asarray(q_ref, float))
-    return quat_mul(np.broadcast_to(q_ref_inv, quat_abs.shape), quat_abs)
-
-
 def enforce_rotvec_continuity(rotvec: np.ndarray) -> np.ndarray:
     """Continuita' temporale del rotvec dentro una singola demo.
 
-    Quando ||r|| ~ pi la mappa quaternione->rotvec resta ambigua
-    (anche nel frame relativo, se la rotazione effettiva si avvicina a pi).
+    Quando ||r|| ~ pi la mappa quaternione->rotvec resta ambigua.
     Confrontiamo ||r_{t+1} - r_t|| con la rappresentazione equivalente
     ``(1 - 2*pi/||r_{t+1}||) * r_{t+1}`` e teniamo quella piu' vicina.
-
-    NOTA: la consistenza INTER-DEMO non e' demandata a questa funzione:
-    viene garantita dalla ricentratura globale rispetto a ``q_ref`` (vedi
-    ``recenter_quat_stream``), che porta tutte le demo nello stesso intorno
-    dell'identita' nel frame relativo.
     """
     rotvec = np.asarray(rotvec, float).copy()
     n = len(rotvec)
@@ -248,21 +191,19 @@ def savgol_smooth(arr: np.ndarray, window: int, polyorder: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Pipeline su singola demo
 # ---------------------------------------------------------------------------
-def preprocess_one_stage1(in_path: Path, dt: float,
+def preprocess(in_path: Path, dt: float,
                           smooth: bool = False, smooth_window: int = 9,
                           smooth_polyorder: int = 3):
     """Stadio 1: clean + resample + smooth + continuity intra-demo.
 
-    Restituisce ``(n_in, t_grid, xyz_g, quat_g, grip_g)`` *senza* fissare
-    ancora il segno globale del quaternione e *senza* calcolare il rotvec.
-    L'allineamento inter-demo (sign flip globale rispetto a ``q_ref``) e
-    la conversione a rotvec avvengono in ``finalize_and_save``.
+    Restituisce ``(n_in, t_grid, xyz_g, quat_g, rotvec, grip_g)``.
     """
     arr = load_demo(in_path)
     n_in = len(arr)
 
-    # 1) hemisphere continuity sui dati grezzi (PRIMA del resampling)
+    # 1) hemisphere continuity sui dati grezzi
     arr[:, 4:8] = enforce_hemisphere(arr[:, 4:8])
+
     # 2) normalizzazione quaternione
     arr[:, 4:8] = normalize_quat(arr[:, 4:8])
 
@@ -279,110 +220,38 @@ def preprocess_one_stage1(in_path: Path, dt: float,
     quat_g = normalize_quat(quat_g)
     quat_g = enforce_hemisphere(quat_g)
 
+    # 5) converti in rapp. asse angolo
+    rotvec = quat_to_rotvec(quat_g)
+
+    # 6) assicura continuità temporale rotvec
+    rotvec = enforce_rotvec_continuity(rotvec)
+
     # azzeriamo l'origine temporale per coerenza
     t_grid = t_grid - t_grid[0]
 
-    return n_in, t_grid, xyz_g, quat_g, grip_g
+    return n_in, t_grid, xyz_g, quat_g, rotvec, grip_g
 
 
-def finalize_and_save(out_path: Path, n_in: int, t_grid: np.ndarray,
+def summary_and_save(out_path: Path, n_in: int, t_grid: np.ndarray,
                       xyz_g: np.ndarray, quat_g: np.ndarray,
-                      grip_g: np.ndarray, q_ref: np.ndarray,
+                      rotvec: np.ndarray, grip_g: np.ndarray,
                       dt: float,
                       smooth: bool = False, smooth_window: int = 9,
                       smooth_polyorder: int = 3,
                       verbose: bool = True,
                       in_name: str = "") -> None:
-    """Stadio 2: ricentratura della rotazione su ``q_ref``, log-map,
-    continuity rotvec, salvataggio.
 
-    - ``qx,qy,qz,qw`` salvati nel CSV restano la rotazione ASSOLUTA del TCP
-      (utile per replay / visualizzazione 3D).
-    - ``rx,ry,rz`` salvati nel CSV sono la log-map della rotazione RELATIVA
-      a ``q_ref``: e' questo lo spazio in cui DMP / GMM / BC apprendono.
-    """
-    # rotazione relativa a q_ref (stream): q_rel = q_ref^{-1} * q_abs
-    quat_rel = recenter_quat_stream(quat_g, q_ref)
-    # garantiamo continuita' anche dello stream relativo (per la SLERP
-    # interna alla log-map non e' detto che si conservi automaticamente)
-    quat_rel = enforce_hemisphere(quat_rel)
-    quat_rel = normalize_quat(quat_rel)
 
-    # log-map sul frame relativo: norme tipicamente piccole, lontane da pi.
-    rotvec_rel = quat_to_rotvec(quat_rel)
-    rotvec_rel = enforce_rotvec_continuity(rotvec_rel)
-
-    out = np.column_stack([t_grid, xyz_g, quat_g, rotvec_rel, grip_g])
+    out = np.column_stack([t_grid, xyz_g, quat_g, rotvec, grip_g])
     save_demo(out_path, out)
 
     if verbose:
         smooth_info = (f", smoothing=savgol(window={smooth_window},"
                        f" polyorder={smooth_polyorder})") if smooth else ""
-        max_norm = float(np.linalg.norm(rotvec_rel, axis=1).max())
+        max_norm = float(np.linalg.norm(rotvec, axis=1).max())
         print(f"  {in_name}: {n_in} -> {len(out)} campioni "
               f"(durata {t_grid[-1]:.2f}s, dt={dt:g}s{smooth_info}; "
-              f"max ||r_rel||={max_norm:.3f} rad) -> {out_path}")
-
-
-def save_qref_sidecar(out_dir: Path, q_ref: np.ndarray,
-                      source_demo: str | None = None) -> Path:
-    """Persiste ``q_ref`` come JSON sidecar nella cartella delle demo
-    processate. Letto in seguito da DMP/GMM/BC preprocess per propagarlo
-    fino al modello allenato; usato a inferenza per ri-comporre la
-    rotazione assoluta dal rotvec relativo prodotto dal modello.
-    """
-    import json
-    q = np.asarray(q_ref, float).reshape(4)
-    out = {
-        "qx": float(q[0]), "qy": float(q[1]),
-        "qz": float(q[2]), "qw": float(q[3]),
-        "convention": "scalar_last (qx,qy,qz,qw)",
-        "meaning": "q_ref t.c. q_rel(t) = q_ref^-1 * q_abs(t); "
-                   "rx,ry,rz nei CSV sono log(q_rel).",
-    }
-    if source_demo:
-        out["source"] = source_demo
-    path = out_dir / "qref.json"
-    with open(path, "w") as f:
-        json.dump(out, f, indent=2)
-    return path
-
-
-def load_qref_sidecar(task_dir: Path) -> np.ndarray:
-    """Carica ``q_ref`` (qx,qy,qz,qw) dal sidecar JSON in ``task_dir``.
-
-    Solleva ``FileNotFoundError`` se il sidecar non esiste: i moduli a valle
-    devono usare un fallback (q_ref=identita') solo per modelli legacy.
-    """
-    import json
-    path = task_dir / "qref.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"qref.json non trovato in {task_dir}.")
-    with open(path) as f:
-        d = json.load(f)
-    q = np.array([d["qx"], d["qy"], d["qz"], d["qw"]], float)
-    n = float(np.linalg.norm(q))
-    if n < 1e-9:
-        raise ValueError(f"q_ref degenere in {path}.")
-    return q / n
-
-
-def load_ref_quat_from_csv(path: Path) -> np.ndarray:
-    """Estrae il quaternione del primo campione di un CSV gia' processato.
-
-    Utile per ri-processare una singola demo (--index) mantenendo la stessa
-    convenzione di ricentratura usata in un batch precedente.
-    """
-    with open(path) as f:
-        rdr = csv.DictReader(f)
-        for row in rdr:
-            q = np.array([float(row["qx"]), float(row["qy"]),
-                          float(row["qz"]), float(row["qw"])], float)
-            n = float(np.linalg.norm(q))
-            if n < 1e-9:
-                raise ValueError(f"Quaternione di riferimento degenere in {path}.")
-            return q / n
-    raise ValueError(f"CSV di riferimento vuoto: {path}")
+              f"max ||r||={max_norm:.3f} rad) -> {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -423,11 +292,6 @@ def parse_args() -> argparse.Namespace:
                    help="Finestra (campioni) per Savitzky-Golay; resa dispari se pari (default: 9).")
     p.add_argument("--smooth-polyorder", type=int, default=3,
                    help="Grado del polinomio per Savitzky-Golay (default: 3).")
-    p.add_argument("--ref-from", type=Path, default=None,
-                   help="CSV gia' processato da cui prendere il quaternione "
-                        "di riferimento per la ricentratura della rotazione. "
-                        "Se omesso, il riferimento e' il primo campione della "
-                        "prima demo processata in questo run.")
     return p.parse_args()
 
 
@@ -441,11 +305,12 @@ def main() -> int:
     print(f"  in : {args.in_root / args.task}")
     print(f"  out: {out_dir}")
 
-    # --- stadio 1: clean + resample + smooth + continuity intra-demo --------
-    stage1: list[tuple] = []
+    # --- preprcessing: clean + resample + smooth + continuity --------
+    preprocessed: list[tuple] = []
     for f in inputs:
+        out_path = out_dir / f"processed_{f.name}"
         try:
-            n_in, t_grid, xyz_g, quat_g, grip_g = preprocess_one_stage1(
+            n_in, t_grid, xyz_g, quat_g, rotvec, grip_g = preprocess(
                 f, dt=args.dt,
                 smooth=args.smooth,
                 smooth_window=args.smooth_window,
@@ -454,45 +319,22 @@ def main() -> int:
         except Exception as e:
             print(f"  [ERR-stage1] {f.name}: {e}")
             continue
-        stage1.append((f, n_in, t_grid, xyz_g, quat_g, grip_g))
+        preprocessed.append((f, n_in, t_grid, xyz_g, quat_g, rotvec, grip_g))
 
-    if not stage1:
+        summary_and_save(out_path, n_in, t_grid,
+                         xyz_g, quat_g, rotvec, grip_g,
+                         args.dt,
+                         args.smooth,
+                         args.smooth_window,
+                         args.smooth_polyorder,
+                         verbose=True,
+                         in_name=f.name)
+
+    if not preprocessed:
         print("Nessuna demo processata.")
         return 0
 
-    # --- scelta del quaternione di riferimento per la ricentratura ----------
-    ref_source = None
-    if args.ref_from is not None:
-        if not args.ref_from.is_file():
-            raise SystemExit(f"--ref-from non trovato: {args.ref_from}")
-        q_ref = load_ref_quat_from_csv(args.ref_from)
-        ref_source = str(args.ref_from)
-        print(f"  q_ref (from {args.ref_from.name}): {q_ref.round(4).tolist()}")
-    else:
-        q_ref = stage1[0][4][0].copy()
-        q_ref = q_ref / max(float(np.linalg.norm(q_ref)), 1e-12)
-        ref_source = stage1[0][0].name + " (primo campione)"
-        print(f"  q_ref (da {stage1[0][0].name}, primo campione): "
-              f"{q_ref.round(4).tolist()}")
-
-    # --- stadio 2: ricentratura + log-map + continuity rotvec + save --------
-    for f, n_in, t_grid, xyz_g, quat_g, grip_g in stage1:
-        out_path = out_dir / f"processed_{f.name}"
-        try:
-            finalize_and_save(
-                out_path, n_in, t_grid, xyz_g, quat_g, grip_g,
-                q_ref=q_ref, dt=args.dt,
-                smooth=args.smooth,
-                smooth_window=args.smooth_window,
-                smooth_polyorder=args.smooth_polyorder,
-                verbose=True, in_name=f.name,
-            )
-        except Exception as e:
-            print(f"  [ERR-stage2] {f.name}: {e}")
-
-    # sidecar qref.json: riferimento globale del task per i moduli a valle.
-    sidecar = save_qref_sidecar(out_dir, q_ref, source_demo=ref_source)
-    print(f"  q_ref persistito in: {sidecar}")
+    
     print("Done.")
     return 0
 

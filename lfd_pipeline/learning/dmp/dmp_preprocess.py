@@ -38,7 +38,6 @@ from config.robot_config import (  # noqa: E402
     DMP_PREPROCESSED_ROOT,
     PREPROCESSED_ROOT,
 )
-from preprocessing.preprocess_demos import load_qref_sidecar  # noqa: E402
 
 # colonne attese nel CSV di common-preprocessing
 COMMON_HEADER = ["t", "x", "y", "z", "qx", "qy", "qz", "qw",
@@ -132,7 +131,7 @@ def estimate_dt(t: np.ndarray) -> float:
 
 
 def finite_diff_derivatives(y: np.ndarray, dt: float):
-    """ẏ e ÿ via differenze finite centrate (np.gradient, edge_order=2)."""
+    """yd e ydd via differenze finite centrate (np.gradient, edge_order=2)."""
     dy = np.gradient(y, dt, axis=0, edge_order=2)
     ddy = np.gradient(dy, dt, axis=0, edge_order=2)
     return dy, ddy
@@ -185,17 +184,6 @@ def main() -> int:
     print(f"DMP preprocessing su {len(inputs)} demo per '{args.task}'")
     print(f"  in : {args.in_root / args.task}")
     print(f"  out: {out_dir}")
-
-    # q_ref dal sidecar prodotto da preprocess_demos: serve per ricomporre la
-    # rotazione assoluta a inferenza (q_abs = q_ref * exp(r_rel)).
-    try:
-        q_ref = load_qref_sidecar(args.in_root / args.task)
-        print(f"  q_ref : {q_ref.round(4).tolist()}")
-    except FileNotFoundError:
-        q_ref = np.array([0.0, 0.0, 0.0, 1.0], float)
-        print("  [warn] qref.json non trovato: assumo q_ref=identita' "
-              "(rotazioni assolute). Riproc. con preprocess_demos per "
-              "abilitare la ricentratura.")
 
     Y_list, dY_list, ddY_list = [], [], []
     t_list, grip_list = [], []
@@ -257,9 +245,6 @@ def main() -> int:
         demo_lengths=np.asarray(n_per_demo, dtype=int),
         demo_files=np.asarray(demo_names),
         y_columns=np.asarray(Y_COLS),
-        # quaternione di riferimento per la ricentratura della rotazione:
-        # rx,ry,rz nelle Y_list sono log(q_ref^{-1} * q_abs).
-        q_ref=np.asarray(q_ref, float),
     )
     print(f"\nDataset DMP salvato: {out_npz}")
     print(f"  K_demos={len(inputs)}  |  dt={dt_out:.4f}s  |  T_mean={np.mean(durations):.3f}s")

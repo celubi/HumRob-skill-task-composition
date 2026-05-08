@@ -6,11 +6,11 @@ Per ogni demo selezionata mostra:
      spaziali; start (verde) ed end (rosso) della demo come marker;
   2) una griglia 3x3 dei segnali nel tempo:
          x(t)  y(t)  z(t)
-         rx_abs(t)  ry_abs(t)  rz_abs(t)
+         rx(t)  ry(t)  rz(t)
          gripper(t)  ||v||(t)  vuoto
-     dove rx/ry/rz sono il rotvec assoluto (log-map del quaternione del CSV)
-     ricostruito sia per la demo sia per i generati: questo permette di
-     confrontare le rotazioni sullo stesso spazio senza dover caricare q_ref.
+     dove rx/ry/rz sono il rotvec ASSOLUTO (log-map del quaternione del CSV),
+     ricostruito sia per la demo sia per i generati per confrontare le
+     rotazioni sullo stesso spazio.
 
 Uso:
     python3 visualize_comparison.py --task pick
@@ -71,7 +71,7 @@ def load_demo(path: Path) -> dict:
         "name": path.name,
         "t": a[:, 0], "xyz": a[:, 1:4],
         "quat": a[:, 4:8],          # qx,qy,qz,qw assoluto (per il plot 3D)
-        "rotvec_rel": a[:, 8:11],   # rx,ry,rz relativo a q_ref (preprocessato)
+        "rotvec": a[:, 8:11],       # rx,ry,rz assoluto (preprocessato)
         "grip": a[:, 11],
     }
 
@@ -83,24 +83,6 @@ def load_generated(path: Path) -> dict:
         "t": a[:, 0], "xyz": a[:, 1:4],
         "quat": a[:, 4:8], "grip": a[:, 8],
     }
-
-
-def load_qref(task_dir: Path) -> np.ndarray:
-    """Carica q_ref dal sidecar JSON ``preprocessed_demonstrations/<task>/qref.json``.
-    Fallback all'identita' se manca (i rotvec relativi coincidono con quelli assoluti)."""
-    import json
-    p = task_dir / "qref.json"
-    if not p.is_file():
-        print(f"[viz] [warn] qref.json non trovato in {task_dir}: "
-              "uso identita' (rotvec relativo == assoluto).")
-        return np.array([0.0, 0.0, 0.0, 1.0], float)
-    with open(p) as f:
-        d = json.load(f)
-    q = np.array([d["qx"], d["qy"], d["qz"], d["qw"]], float)
-    n = float(np.linalg.norm(q))
-    if n < 1e-9:
-        raise SystemExit(f"q_ref degenere in {p}.")
-    return q / n
 
 
 # ---------------------------------------------------------------------------
@@ -136,37 +118,6 @@ def _quat_array_to_rotvec(quat: np.ndarray) -> np.ndarray:
         if np.linalg.norm(r_alt - out[i - 1]) < np.linalg.norm(r - out[i - 1]):
             out[i] = r_alt
     return out
-
-
-def _quat_inv(q: np.ndarray) -> np.ndarray:
-    out = np.asarray(q, float).copy()
-    out[..., :3] = -out[..., :3]
-    return out
-
-
-def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    """Prodotto di Hamilton (qx,qy,qz,qw)."""
-    q1 = np.asarray(q1, float)
-    q2 = np.asarray(q2, float)
-    x1, y1, z1, w1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
-    x2, y2, z2, w2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
-    out = np.empty(np.broadcast_shapes(q1.shape, q2.shape), float)
-    out[..., 0] = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-    out[..., 1] = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-    out[..., 2] = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-    out[..., 3] = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-    return out
-
-
-def quat_array_to_rotvec_rel(quat_abs: np.ndarray, q_ref: np.ndarray) -> np.ndarray:
-    """(N,4) quaternioni ASSOLUTI -> (N,3) rotvec RELATIVI a ``q_ref``:
-        q_rel(t) = q_ref^{-1} * q_abs(t)
-        rotvec_rel(t) = log(q_rel(t))
-    Stessa convenzione di preprocess_demos.recenter + log-map. Garantisce
-    anche la continuita' temporale del rotvec (scelta del ramo)."""
-    q_ref_inv = _quat_inv(q_ref)
-    q_rel = _quat_mul(q_ref_inv[None, :], quat_abs)
-    return _quat_array_to_rotvec(q_rel)
 
 
 def _quat_to_R(q: np.ndarray) -> np.ndarray:
@@ -273,7 +224,7 @@ def plot_3d(demo: dict, gen_by_method: dict[str, dict],
         print(f"  saved: {save_path}")
 
 
-def plot_signals(demo: dict, gen_by_method: dict[str, dict], q_ref: np.ndarray,
+def plot_signals(demo: dict, gen_by_method: dict[str, dict],
                  task: str, idx_str: str, save_path: Path | None) -> None:
     import matplotlib.pyplot as plt
 
@@ -282,15 +233,15 @@ def plot_signals(demo: dict, gen_by_method: dict[str, dict], q_ref: np.ndarray,
 
     titles = [
         ["x [m]", "y [m]", "z [m]"],
-        ["rx [rad] (rel q_ref)", "ry [rad] (rel q_ref)", "rz [rad] (rel q_ref)"],
+        ["rx [rad]", "ry [rad]", "rz [rad]"],
         ["gripper", "||v|| [m/s]", ""],
     ]
 
     def _plot_curve(ax, t, y, color, ls, lw, label):
         ax.plot(t, y, ls, color=color, lw=lw, label=label)
 
-    # demo: rotvec preso DIRETTAMENTE dal CSV preprocessato (rel a q_ref)
-    rv_demo = demo["rotvec_rel"]
+    # demo: rotvec preso DIRETTAMENTE dal CSV preprocessato (assoluto)
+    rv_demo = demo["rotvec"]
     t_d = demo["t"]
     xyz_d = demo["xyz"]
     grip_d = demo["grip"]
@@ -305,11 +256,10 @@ def plot_signals(demo: dict, gen_by_method: dict[str, dict], q_ref: np.ndarray,
         v_d = np.linalg.norm(np.diff(xyz_d, axis=0), axis=1) / np.maximum(dt_d, 1e-12)
         _plot_curve(axes[2, 1], t_d[1:], v_d, "black", "-", 1.4, None)
 
-    # generated: rotvec relativo calcolato come q_ref^-1 * q_abs (stesso
-    # spazio della demo, coerente con la convenzione del preprocessing)
+    # generated: rotvec assoluto calcolato dal quaternione (stesso spazio della demo)
     for method, g in gen_by_method.items():
         c = METHOD_COLORS.get(method, "tab:purple")
-        rv = quat_array_to_rotvec_rel(g["quat"], q_ref)
+        rv = _quat_array_to_rotvec(g["quat"])
         t = g["t"]
         xyz = g["xyz"]
         grip = g["grip"]
@@ -334,7 +284,7 @@ def plot_signals(demo: dict, gen_by_method: dict[str, dict], q_ref: np.ndarray,
     axes[2, 2].axis("off")
 
     fig.suptitle(f"[{task} #{idx_str}] segnali: demo (nero) vs generate "
-                 "(rotazioni nello spazio rel. q_ref della preprocessing)")
+                 "(rotazioni nello spazio rotvec assoluto)")
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
         fig.legend(handles, labels, fontsize=12, loc="lower center",
@@ -433,10 +383,8 @@ def main() -> int:
 
     indices = collect_demo_indices(args.in_root, args.task,
                                    args.index, args.first_k)
-    q_ref = load_qref(args.in_root / args.task)
     print(f"[viz] task    : {args.task}")
     print(f"[viz] metodi  : {' '.join(methods)}")
-    print(f"[viz] q_ref   : {q_ref.round(4).tolist()}")
     print(f"[viz] {len(indices)} demo da visualizzare: {indices}")
 
     save_dir = args.save_dir
@@ -480,7 +428,7 @@ def main() -> int:
         if not args.no_signals:
             out = (save_dir / f"{args.task}_{idx_str}_signals.png"
                    if save_dir else None)
-            plot_signals(demo, gen_by_method, q_ref,
+            plot_signals(demo, gen_by_method,
                          args.task, idx_str, out)
 
     if save_dir is None:

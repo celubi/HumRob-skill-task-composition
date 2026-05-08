@@ -118,44 +118,6 @@ def _rotvec_to_quat(r: np.ndarray) -> np.ndarray:
     return q / np.linalg.norm(q)
 
 
-def _quat_to_rotvec(q: np.ndarray) -> np.ndarray:
-    q = np.asarray(q, float)
-    qw = float(max(-1.0, min(1.0, q[3])))
-    theta = 2.0 * math.acos(qw)
-    sin_h = math.sqrt(max(0.0, 1.0 - qw * qw))
-    if sin_h < 1e-12:
-        return np.zeros(3, float)
-    return q[:3] / sin_h * theta
-
-
-def _quat_inv(q: np.ndarray) -> np.ndarray:
-    q = np.asarray(q, float)
-    out = q.copy()
-    out[..., :3] = -out[..., :3]
-    return out
-
-
-def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    q1 = np.asarray(q1, float)
-    q2 = np.asarray(q2, float)
-    x1, y1, z1, w1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
-    x2, y2, z2, w2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
-    out = np.empty(np.broadcast_shapes(q1.shape, q2.shape), float)
-    out[..., 0] = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-    out[..., 1] = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-    out[..., 2] = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-    out[..., 3] = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-    return out
-
-
-def _abs_rpy_to_rel_rotvec(rpy, q_ref: np.ndarray) -> np.ndarray:
-    """rpy assoluto -> rotvec nel frame relativo a ``q_ref``."""
-    R3 = _rpy_zyx_to_R(rpy[0], rpy[1], rpy[2])
-    q_abs = _rotvec_to_quat(_R_to_rotvec(R3))
-    q_rel = _quat_mul(_quat_inv(q_ref), q_abs)
-    return _quat_to_rotvec(q_rel)
-
-
 # ---------------------------------------------------------------------------
 # generator
 # ---------------------------------------------------------------------------
@@ -182,9 +144,6 @@ class BCGenerator:
         self.s0_mean = np.asarray(ex["s0_mean"], float)   # (6,)
         self.sT_mean = np.asarray(ex["sT_mean"], float)   # (6,)
         self.grip_ref = np.asarray(ex.get("grip_ref", []), float)
-        # quaternione di riferimento per la ricentratura della rotazione.
-        self.q_ref = (np.asarray(ex["q_ref"], float) if "q_ref" in ex
-                      else np.array([0.0, 0.0, 0.0, 1.0], float))
         # GC-BC ha state_dim = 12 = [s_t, g - s_t]; vanilla BC = 6.
         self.goal_conditioned = bool(ex.get("goal_conditioned",
                                             self.model.cfg.state_dim == 12))
@@ -201,18 +160,16 @@ class BCGenerator:
         goal_xyzrpy: Optional[list],
         duration_scale: float = 1.0,
     ) -> Trajectory:
-        # 1) stato iniziale e goal in spazio [x,y,z,rotvec_REL] (relativo a q_ref)
+        # 1) stato iniziale e goal in spazio [x,y,z,rotvec_abs]
         s0 = self.s0_mean.copy()
         if start_xyzrpy is not None:
             s0[:3] = np.asarray(start_xyzrpy[:3], float)
-            r_rel_s = _abs_rpy_to_rel_rotvec(start_xyzrpy[3:], self.q_ref)
-            s0[3:] = _canonicalize_rotvec(r_rel_s, r_ref=self.s0_mean[3:])
+            s0[3:] = _rpy_zyx_to_rotvec(start_xyzrpy[3:], r_ref=self.s0_mean[3:])
 
         g = self.sT_mean.copy()
         if goal_xyzrpy is not None:
             g[:3] = np.asarray(goal_xyzrpy[:3], float)
-            r_rel_g = _abs_rpy_to_rel_rotvec(goal_xyzrpy[3:], self.q_ref)
-            g[3:] = _canonicalize_rotvec(r_rel_g, r_ref=self.sT_mean[3:])
+            g[3:] = _rpy_zyx_to_rotvec(goal_xyzrpy[3:], r_ref=self.sT_mean[3:])
 
         # 2) numero di step coerente con DMP/GMM
         T_out = self.T_mean * float(duration_scale)
@@ -236,20 +193,16 @@ class BCGenerator:
         rotvec = Y[:, 3:6].copy()
 
         # 4) goal-blending lineare in s, sempre attivo (vedi docstring).
-        #    I rotvec del rollout sono RELATIVI a q_ref; per coerenza calcolo
-        #    anche start/goal del blending in coordinate relative.
         d_pos0 = np.zeros(3); d_rv0 = np.zeros(3)
         d_pos1 = np.zeros(3); d_rv1 = np.zeros(3)
         if start_xyzrpy is not None:
             sxyz = np.asarray(start_xyzrpy[:3], float)
-            srv = _abs_rpy_to_rel_rotvec(start_xyzrpy[3:], self.q_ref)
-            srv = _canonicalize_rotvec(srv, r_ref=rotvec[0])
+            srv = _rpy_zyx_to_rotvec(start_xyzrpy[3:], r_ref=rotvec[0])
             d_pos0 = sxyz - xyz[0]
             d_rv0 = srv - rotvec[0]
         if goal_xyzrpy is not None:
             gxyz = np.asarray(goal_xyzrpy[:3], float)
-            grv = _abs_rpy_to_rel_rotvec(goal_xyzrpy[3:], self.q_ref)
-            grv = _canonicalize_rotvec(grv, r_ref=rotvec[-1])
+            grv = _rpy_zyx_to_rotvec(goal_xyzrpy[3:], r_ref=rotvec[-1])
             d_pos1 = gxyz - xyz[-1]
             d_rv1 = grv - rotvec[-1]
         if start_xyzrpy is not None or goal_xyzrpy is not None:
@@ -257,13 +210,11 @@ class BCGenerator:
                 xyz[i]    = xyz[i]    + (1.0 - s) * d_pos0 + s * d_pos1
                 rotvec[i] = rotvec[i] + (1.0 - s) * d_rv0  + s * d_rv1
 
-        # 5) rotvec relativo a q_ref -> quaternioni ASSOLUTI con continuita'
-        #    emisferica:   q_abs = q_ref * exp(rotvec_rel)
+        # 5) rotvec assoluto -> quaternione con continuita' emisferica.
         quat = np.empty((steps, 4), float)
         prev = None
         for i in range(steps):
-            q_rel = _rotvec_to_quat(rotvec[i])
-            q_abs = _quat_mul(self.q_ref, q_rel)
+            q_abs = _rotvec_to_quat(rotvec[i])
             q_abs = q_abs / max(float(np.linalg.norm(q_abs)), 1e-12)
             if prev is not None and float(np.dot(q_abs, prev)) < 0.0:
                 q_abs = -q_abs

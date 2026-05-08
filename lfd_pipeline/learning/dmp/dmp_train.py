@@ -168,9 +168,6 @@ def main() -> int:
     dt = float(data["dt"])
     T_mean = float(data["T_mean"])
     demo_files = data["demo_files"]
-    q_ref = (np.asarray(data["q_ref"], float)
-             if "q_ref" in data.files
-             else np.array([0.0, 0.0, 0.0, 1.0], float))
     K = len(Y_list)
 
     selected_index = None
@@ -277,9 +274,6 @@ def main() -> int:
         y_columns=np.asarray(Y_COLS),
         demo_files=demo_files,
         scales=scales,           # (K, 6)
-        # quaternione di riferimento per la ricomposizione della rotazione
-        # assoluta a inferenza (q_abs = q_ref * exp(r_rel)).
-        q_ref=q_ref,
     )
     if W_per_demo is not None:
         save_dict["W_per_demo"] = W_per_demo

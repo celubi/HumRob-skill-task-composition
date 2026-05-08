@@ -152,10 +152,6 @@ def main() -> int:
     grip_ref = (np.stack(grip_on_ref, axis=0).mean(axis=0).astype(np.float32)
                 if grip_on_ref else np.zeros(N_ref, dtype=np.float32))
 
-    q_ref = (np.asarray(d["q_ref"], float)
-             if "q_ref" in d.files
-             else np.array([0.0, 0.0, 0.0, 1.0], float))
-
     extra = {
         "task": args.task,
         "goal_conditioned": True,
@@ -166,9 +162,6 @@ def main() -> int:
         "sT_mean": sT_mean,
         "s_ref": s_ref.astype(np.float32),
         "grip_ref": grip_ref,
-        # quaternione di riferimento per la ricentratura della rotazione
-        # (q_abs = q_ref * exp(rotvec_rel) a inferenza).
-        "q_ref": q_ref.astype(np.float32),
         "s_columns": list(d["s_columns"]),
         "s_tilde_columns": list(d["s_tilde_columns"]) if "s_tilde_columns" in d.files else None,
         "a_columns": list(d["a_columns"]),

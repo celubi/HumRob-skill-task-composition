@@ -71,7 +71,7 @@ def load_preprocessed_demo(path: Path) -> dict:
         "t": arr[:, 0],
         "xyz": arr[:, 1:4],
         "quat": arr[:, 4:8],     # qx, qy, qz, qw (assoluto)
-        "rotvec": arr[:, 8:11],  # relativo a q_ref
+        "rotvec": arr[:, 8:11],  # rotvec assoluto (log-map del quaternione)
         "grip": arr[:, 11],
     }
 

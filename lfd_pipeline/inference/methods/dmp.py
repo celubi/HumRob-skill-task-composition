@@ -65,9 +65,7 @@ def _canonicalize_rotvec(r: np.ndarray,
     ``2*pi - ||r||``). Quando ``r_ref`` e' fornito scegliamo tra ``r`` e
     ``r'`` quella piu' vicina (in norma euclidea) a ``r_ref``: cosi' lo
     start/goal di inferenza vive sullo stesso ramo dei rotvec usati nel
-    training (y0_mean / g_mean), che a loro volta sono stati canonicalizzati
-    in modo consistente inter-demo dal preprocessing (alignment
-    quaternionico globale, vedi preprocess_demos.align_quat_to_ref).
+    training (y0_mean / g_mean).
 
     Se ``r_ref`` e' None, fallback al canone "componente con modulo massimo
     positiva" (compatibilita' con modelli legacy che non hanno y0_mean/g_mean
@@ -106,56 +104,6 @@ def _rotvec_to_quat(r: np.ndarray) -> np.ndarray:
     return q / np.linalg.norm(q)
 
 
-def _quat_to_rotvec(q: np.ndarray) -> np.ndarray:
-    """Inversa di ``_rotvec_to_quat`` (qx, qy, qz, qw -> rotvec)."""
-    q = np.asarray(q, float)
-    qw = float(max(-1.0, min(1.0, q[3])))
-    theta = 2.0 * math.acos(qw)
-    sin_h = math.sqrt(max(0.0, 1.0 - qw * qw))
-    if sin_h < 1e-12:
-        return np.zeros(3, float)
-    axis = q[:3] / sin_h
-    return axis * theta
-
-
-def _quat_inv(q: np.ndarray) -> np.ndarray:
-    """Inverso di quaternione unitario (qx, qy, qz, qw)."""
-    q = np.asarray(q, float)
-    out = q.copy()
-    out[..., :3] = -out[..., :3]
-    return out
-
-
-def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-    """Prodotto di Hamilton (qx, qy, qz, qw)."""
-    q1 = np.asarray(q1, float)
-    q2 = np.asarray(q2, float)
-    x1, y1, z1, w1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
-    x2, y2, z2, w2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
-    out = np.empty(np.broadcast_shapes(q1.shape, q2.shape), float)
-    out[..., 0] = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-    out[..., 1] = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-    out[..., 2] = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-    out[..., 3] = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-    return out
-
-
-def _rpy_zyx_to_quat(rpy) -> np.ndarray:
-    return _rotvec_to_quat(_R_to_rotvec(_rpy_zyx_to_R(rpy[0], rpy[1], rpy[2])))
-
-
-def _abs_rpy_to_rel_rotvec(rpy, q_ref: np.ndarray) -> np.ndarray:
-    """rpy assoluto -> rotvec nel frame relativo a ``q_ref``.
-
-        q_abs = rpy_to_quat(rpy)
-        q_rel = q_ref^{-1} * q_abs
-        r_rel = log(q_rel)
-    """
-    q_abs = _rpy_zyx_to_quat(rpy)
-    q_rel = _quat_mul(_quat_inv(q_ref), q_abs)
-    return _quat_to_rotvec(q_rel)
-
-
 # ---------------------------------------------------------------------------
 # generator
 # ---------------------------------------------------------------------------
@@ -179,11 +127,6 @@ class DMPGenerator:
         self.g_mean = np.asarray(d["g_mean"], float)    # (6,)
         self.s_ref = d["s_ref"] if "s_ref" in d.files else None
         self.grip_ref = d["grip_ref"] if "grip_ref" in d.files else np.array([])
-        # quaternione di riferimento per la ricentratura della rotazione.
-        # Se assente (modello legacy) si assume identita': i rotvec sono
-        # interpretati come rotazioni assolute (vecchia convenzione).
-        self.q_ref = (np.asarray(d["q_ref"], float) if "q_ref" in d.files
-                      else np.array([0.0, 0.0, 0.0, 1.0], float))
 
     # ------------------------------------------------------------------ API
     def generate(
@@ -193,20 +136,18 @@ class DMPGenerator:
         duration_scale: float = 1.0,
     ) -> Trajectory:
         # endpoint del rollout: parto dai default e sovrascrivo se richiesto.
-        # Per la rotazione lavoro nel frame RELATIVO a q_ref:
-        #   r_rel = log(q_ref^{-1} * q_abs)
-        # cosi' i rotvec di start/goal vivono nello stesso spazio dei rotvec
-        # con cui il DMP e' stato allenato (preprocess_demos -> recenter).
+        # Le rotazioni di start/goal vengono convertite in rotvec ASSOLUTO
+        # (stesso spazio dei rotvec con cui il DMP e' stato allenato).
         y0 = self.y0_mean.copy()
         g = self.g_mean.copy()
         if start_xyzrpy is not None:
             y0[:3] = np.asarray(start_xyzrpy[:3], float)
-            r_rel_s = _abs_rpy_to_rel_rotvec(start_xyzrpy[3:], self.q_ref)
-            y0[3:] = _canonicalize_rotvec(r_rel_s, r_ref=self.y0_mean[3:])
+            r_s = _rpy_zyx_to_rotvec(start_xyzrpy[3:], r_ref=self.y0_mean[3:])
+            y0[3:] = r_s
         if goal_xyzrpy is not None:
             g[:3] = np.asarray(goal_xyzrpy[:3], float)
-            r_rel_g = _abs_rpy_to_rel_rotvec(goal_xyzrpy[3:], self.q_ref)
-            g[3:] = _canonicalize_rotvec(r_rel_g, r_ref=self.g_mean[3:])
+            r_g = _rpy_zyx_to_rotvec(goal_xyzrpy[3:], r_ref=self.g_mean[3:])
+            g[3:] = r_g
 
         # rescaling temporale: tau scala sia la durata sia la fase
         tau = float(duration_scale)
@@ -245,13 +186,11 @@ class DMPGenerator:
         xyz = Y[:, :3].copy()
         rotvec = Y[:, 3:6].copy()
 
-        # rotvec relativo a q_ref -> quaternione ASSOLUTO con continuita'
-        # emisferica:   q_abs = q_ref * exp(rotvec_rel)
+        # rotvec assoluto -> quaternione con continuita' emisferica.
         quat = np.empty((steps, 4), float)
         prev = None
         for i in range(steps):
-            q_rel = _rotvec_to_quat(rotvec[i])
-            q_abs = _quat_mul(self.q_ref, q_rel)
+            q_abs = _rotvec_to_quat(rotvec[i])
             q_abs = q_abs / max(float(np.linalg.norm(q_abs)), 1e-12)
             if prev is not None and float(np.dot(q_abs, prev)) < 0.0:
                 q_abs = -q_abs
