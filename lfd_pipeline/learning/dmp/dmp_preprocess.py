@@ -1,255 +1,313 @@
-"""Pre-processing model-specific per DMP (Section II-D del paper).
+""" 
+    DMP preprocessing module.
+    Per la generazione di traiettorie utilizzando il modello DMP,
+    in questa repo vengono utilizzate due versioni di DMP:
+        - DMP classico, per le compoenti cartesiane che rappresentano
+          la posizione del TCP nello spazio. Questo modello è implementato
+          utilizzando la formulazione originale proposta da Ijspeert (2013).
+        - DMP basato su quaternioni unitari per rappresentare l'orientamento
+          del TCP nello spazio. Questo modello è implementato utilizzando 
+          la formulazione di Koutras et al. (2020)
 
-Le demo arrivano dalla common-preprocessing su griglia temporale uniforme
-(t, x, y, z, qx, qy, qz, qw, rx, ry, rz, gripper). Per il DMP serve, in
-aggiunta, la velocita' e l'accelerazione di ciascuna componente dello stato
-6D ``y = [x, y, z, rx, ry, rz]``, ottenute via differenze finite (np.gradient,
-edge_order=2).
+    Questo file di prepocessing effettua le operazioni necessarie
+    per entrambe le formulazioni di DMP.
 
-Per ogni demo viene salvato:
-  - un CSV di ispezione con t, y, dy, ddy, gripper
-  - un'entry nel dataset consolidato ``<task>_dmp_dataset.npz``
+    Le demo necessarie per il training dei DMP sono contenute in
+    file .csv (output degli step di preprocessing comuni) con struttura:
+    [t, x, y, z, qx, qy, qz, qw, rx, ry, rz, gripper]
 
-Il dataset consolidato contiene object-arrays (una entry per demo) cosi' da
-mantenere lunghezze potenzialmente diverse senza padding artificiali, e gli
-endpoint di ogni demo (utili al fit DMP).
+    A partire dai dati nei .csv, per allenare i DMP è necessario:
+        - calcolare le derivate prima e seconda della posizione per
+          il DMP classico -> xdot, ydot, zdot, xddot, yddot, zddot
+        - calcolare la velocità angolare e la sua derivata per il
+          DMP per l'orientamento basatu sui quaternioni
+          -> wx, wy, wz, wdotx, wdoty, wdotz
 
-Uso:
-    python3 dmp_preprocess.py --task pick
-    python3 dmp_preprocess.py --task pour --index 3
+    Questo file produce due file .csv per ogni demo:
+        - dmp_pos_<task>_<num>.csv:
+            contiene le colonne [t, x, y, z, xdot, ydot, zdot, xddot, yddot, zddot]
+        - dmp_quat_<task>_<num>.csv:
+            contiene le colonne [t, qx, qy, qz, qw, wx, wy, wz, wdotx, wdoty, wdotz]
+
+     Questi file vengono poi utilizzati per allenare i rispettivi modelli DMP.
 """
-
-from __future__ import annotations
-
+import numpy as np
 import argparse
 import csv
-import re
 import sys
 from pathlib import Path
 
-import numpy as np
-
 _THIS_DIR = Path(__file__).resolve().parent
-_PKG_ROOT = _THIS_DIR.parents[1]  # .../lfd_pipeline
-if str(_PKG_ROOT) not in sys.path:
+_PKG_ROOT = _THIS_DIR.parents[1]
+
+if _PKG_ROOT not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-from config.robot_config import (  # noqa: E402
-    DMP_PREPROCESSED_ROOT,
+from config.robot_config import (
     PREPROCESSED_ROOT,
+    DMP_PREPROCESSED_ROOT
 )
 
-# colonne attese nel CSV di common-preprocessing
-COMMON_HEADER = ["t", "x", "y", "z", "qx", "qy", "qz", "qw",
-                 "rx", "ry", "rz", "gripper"]
+INPUT_FILE_HEADER = ["t",
+                     "x", "y", "z", 
+                     "qx", "qy", "qz", "qw", 
+                     "rx", "ry", "rz",
+                     "gripper"]
 
-# componenti dello stato 6D usato dal DMP
-Y_COLS = ["x", "y", "z", "rx", "ry", "rz"]
+OUT_FILE_POS_HEADER = ["t", "dt",
+                       "x", "y", "z",
+                       "xdot", "ydot", "zdot",
+                       "xddot", "yddot", "zddot"]
 
-# header del CSV di ispezione visiva
-INSPECTION_HEADER = (
-    ["t"]
-    + Y_COLS
-    + [f"d{c}" for c in Y_COLS]
-    + [f"dd{c}" for c in Y_COLS]
-    + ["gripper"]
-)
+OUT_FILE_QUAT_HEADER = ["t", "dt",
+                       "qx", "qy", "qz", "qw",
+                       "qxdot", "qydot", "qzdot", "qwdot",
+                       "wx", "wy", "wz",
+                       "wdotx", "wdoty", "wdotz",
+                       "eqx", "eqy", "eqz",
+                       "eqxdot", "eqydot", "eqzdot",
+                       "eqxddot", "eqyddot", "eqzddot"]
 
-# tolleranza relativa per verificare l'uniformita' della time-grid
-DT_RTOL = 1e-3
+def pos_preprocessing(t:np.ndarray, pos: np.ndarray):
+    dt = float(t[1]-t[0])
+    pos_dot = np.gradient(pos, dt, axis=0, edge_order=2)
+    pos_ddot = np.gradient(pos_dot, dt, axis=0, edge_order=2)
 
+    dt_vec = dt * np.ones(pos_ddot.shape[0], dtype=float)
 
-# ---------------------------------------------------------------------------
-# I/O
-# ---------------------------------------------------------------------------
-def load_processed_csv(path: Path):
-    """Ritorna (t, y, gripper) con y di shape (N, 6) = [x,y,z,rx,ry,rz]."""
+    return dt_vec, pos_dot, pos_ddot
+    
+def quat_norm(q: np.ndarray):
+    return np.linalg.norm(q, ord=2)
+
+def quat_conj(q:np.ndarray):
+    q_c = q.copy()
+    q_c[:3] = -q[:3]
+
+    return q_c
+
+def quat_prod(q1: np.ndarray, q2:np.ndarray):
+    q1x, q1y, q1z, q1w = q1[0], q1[1], q1[2], q1[3]
+    q2x, q2y, q2z, q2w = q2[0], q2[1], q2[2], q2[3]
+
+    q1v = np.array([q1x, q1y, q1z])
+    q2v = np.array([q2x, q2y, q2z])
+
+    # q = [qx, qy, qz, qw]
+    prod = np.zeros([4,])
+    prod[:3] = q1w*q2v + q2w*q1v + np.cross(q1v, q2v)
+    prod[3] = float(q1w*q2w - np.dot(q1v, q2v))
+
+    return prod
+
+def quat_log_map(q: np.ndarray, tol=1e-6):
+    v = q[:3]
+    w = q[3]
+
+    v_norm = np.linalg.norm(v, ord=2)
+    if v_norm < tol:
+        return np.zeros(3, dtype=float)
+
+    w_clipped = np.clip(w, -1.0, 1.0)
+    theta = np.arctan2(v_norm, w_clipped)
+
+    if theta < tol:
+        return np.array([0, 0, 0])
+    
+    n = v / v_norm
+
+    return theta * n
+
+def quat_force_unit_norm(quat: np.ndarray, tol = 1e-9):
+    q_normalized = quat.copy()
+    for i in range(quat.shape[0]):
+        q = quat[i,:]
+        q_norm = quat_norm(q)
+        
+        if abs(1 - q_norm) < tol:
+            continue
+
+        q_normalized[i,:] = q / q_norm
+    
+    return q_normalized
+
+def quat_force_hemisphere_continuity(quat: np.ndarray):
+    quat_cont = quat.copy()
+
+    for i in range(quat_cont.shape[0]-1):
+        qk = quat_cont[i,:]
+        qk1 = quat_cont[i+1,:]
+
+        if np.dot(qk, qk1)<0:
+            quat_cont[i+1,:] = -quat_cont[i+1, :]
+
+    return quat_cont
+
+def quat_preprocessing(t: np.ndarray, quat: np.ndarray):
+    quat = quat_force_unit_norm(quat)
+    quat = quat_force_hemisphere_continuity(quat)
+
+    dt = abs(t[0] - t[1])
+
+    # compute qdot
+    qdot = np.gradient(quat, dt, axis=0, edge_order=2)
+    
+    # step 3: compute w, wdot
+    w = np.zeros([quat.shape[0], 3], dtype=float)
+    for i in range(quat.shape[0]):
+        q = quat[i,:]
+        q_conj = quat_conj(q)
+
+        delta_q = quat_prod(qdot[i,:], q_conj)
+
+        w[i,:] = 2 * delta_q[:3]
+
+    wdot = np.gradient(w, dt, axis=0, edge_order=2)
+
+    # step 4: calcolo eq, eqdot, eqddot
+    q_goal = quat[-1,:]
+
+    eq = np.zeros([quat.shape[0], 3], dtype=float)
+    for i in range(quat.shape[0]):
+        q = quat[i,:]
+        q_conj = quat_conj(q)
+
+        eq[i,:] = 2 * quat_log_map(quat_prod(q_goal, q_conj))
+
+    eqdot = np.gradient(eq, dt, axis=0, edge_order=2)
+    eqddot = np.gradient(eqdot, dt, axis=0, edge_order=2)
+
+    return qdot, w, wdot, eq, eqdot, eqddot
+
+def read_csv(csv_path: Path):
+    # read the csv
     rows = []
-    with open(path) as f:
-        rdr = csv.DictReader(f)
-        missing = [c for c in COMMON_HEADER if c not in (rdr.fieldnames or [])]
-        if missing:
-            raise ValueError(f"CSV {path} - colonne mancanti: {missing}")
-        for row in rdr:
-            rows.append([float(row[k]) for k in COMMON_HEADER])
-    if not rows:
-        raise ValueError(f"CSV vuoto: {path}")
+    with open(csv_path) as f:
+        csv_reader = csv.DictReader(f)
+        for row in csv_reader:
+            rows.append([float(row[key]) for key in INPUT_FILE_HEADER])
+    
+    # extract desired data
     arr = np.asarray(rows, dtype=float)
-    t = arr[:, 0]
-    # x,y,z = colonne 1..3; rx,ry,rz = colonne 8..10
-    y = np.column_stack([arr[:, 1:4], arr[:, 8:11]])
-    grip = arr[:, 11]
-    return t, y, grip
+
+    t = arr[:,0]
+    pos = np.vstack(arr[:,1:4])
+    quat = np.vstack(arr[:,4:8])
+
+    return t, pos, quat
+
+def collect_inputs(in_root: Path, task: str):
+    # build the path of the folder
+    folder = in_root / task
+
+    # check if it is a folder
+    if not folder.exists():
+        raise SystemError(f"Folder not found: '{folder}'")
+    
+    # collect all files
+    files_path = sorted(f for f in folder.iterdir())
+
+    return files_path
+
+def process_demo_file(args: argparse, file: Path, index: int):
+    # read the csv file
+    t, pos, quat = read_csv(file)
+
+    # create file paths for the output csv files
+    out_root = Path(args.out_root)
+    out_csv_folder_pos = out_root / args.task / "pos"
+    out_csv_folder_quat = out_root / args.task / "rot"
+
+    out_csv_folder_pos.mkdir(parents=True, exist_ok=True)
+    out_csv_folder_quat.mkdir(parents=True, exist_ok=True)
+    
+
+    # apply preprocessing steps for the position DMP
+    dt, pos_dot, pos_ddot = pos_preprocessing(t, pos)
+
+    x, y, z = pos[:,0], pos[:,1], pos[:,2]
+    xdot, ydot, zdot = pos_dot[:,0], pos_dot[:,1], pos_dot[:,2]
+    xddot, yddot, zddot = pos_ddot[:,0], pos_ddot[:,1], pos_ddot[:,2]
+
+    # store the preprocessed data of the position
+    data = np.column_stack([t, dt, x, y, z, xdot, ydot, zdot, xddot, yddot, zddot])
+    out_csv_file_pos = out_csv_folder_pos / f"prepocessed_dmp_pos_{args.task}_{index}.csv"
+    with open(out_csv_file_pos, mode="w") as f:
+        csv_writer = csv.DictWriter(f, OUT_FILE_POS_HEADER)
+        csv_writer.writeheader()
+        for i in range(data.shape[0]):
+            csv_writer.writerow(dict(zip(OUT_FILE_POS_HEADER, data[i,:])))
+
+    # apply preprocessing steps for the quaternion DMP
+    qdot, w, wdot, eq, eqdot, eqddot = quat_preprocessing(t, quat)
+
+    qx, qy, qz, qw = quat[:,0], quat[:,1], quat[:,2], quat[:,3]
+    qxdot, qydot, qzdot, qwdot, = qdot[:,0], qdot[:,1], qdot[:,2], qdot[:,3]
+    wx, wy, wz = w[:,0], w[:,1], w[:,2]
+    wxdot, wydot, wzdot = wdot[:,0], wdot[:,1], wdot[:,2]
+    eqx, eqy, eqz = eq[:,0], eq[:,1], eq[:,2]
+    eqxdot, eqydot, eqzdot = eqdot[:,0], eqdot[:,1], eqdot[:,2]
+    eqxddot, eqyddot, eqzddot = eqddot[:,0], eqddot[:,1], eqddot[:,2]
+
+    data = np.column_stack([t, dt, qx, qy, qz, qw, qxdot, qydot, qzdot, qwdot,
+                            wx, wy, wz, wxdot, wydot, wzdot,
+                            eqx, eqy, eqz,
+                            eqxdot, eqydot, eqzdot, eqxddot, eqyddot, eqzddot])
+    
+    out_csv_file_pos = out_csv_folder_quat / f"prepocessed_dmp_quat_{args.task}_{index}.csv"
+    with open(out_csv_file_pos, mode="w") as f:
+        csv_writer = csv.DictWriter(f, OUT_FILE_QUAT_HEADER)
+        csv_writer.writeheader()
+        for i in range(data.shape[0]):
+            csv_writer.writerow(dict(zip(OUT_FILE_QUAT_HEADER, data[i,:])))
+
+def args_parse():
+    parser = argparse.ArgumentParser(description="Apply the preprocessing pipeline required to train the DMP models")
+    
+    # add all desired parameters
+    parser.add_argument("--task",
+                        required=True,
+                        help="Name of the primitive to train a DMP for (e.g. pick, place, pour)")
+    parser.add_argument("--index",
+                        default= None,
+                        help="Number of the deomnstration used to train the models")
+    parser.add_argument("--in-root",
+                        type=str,
+                        default=PREPROCESSED_ROOT,
+                        help="Path of the .csv files containing global preprocessed demos")
+    parser.add_argument("--out-root",
+                        type=str,
+                        default=DMP_PREPROCESSED_ROOT,
+                        help="Path of the folder where to save the output .csv files of this processing")
+
+    # parse the arguments and return
+    return parser.parse_args()
+
+def main():
+    # parse CLI arguments
+    args = args_parse()
+
+    # collect all csv files with demonstrations of desired task
+    files_path = collect_inputs(args.in_root, args.task)
+
+    # if no index is provided, process all demo files of that task
+    if args.index is None:
+        for index, file in enumerate(files_path):
+            process_demo_file(args, file, index)
+    else:
+        file = files_path[int(args.index)]
+        process_demo_file(args, file, args.index)
+
+    
 
 
-def collect_inputs(in_root: Path, task: str, index: int | None, zfill: int,
-                   first_k: int | None = None):
-    task_dir = in_root / task
-    if not task_dir.is_dir():
-        raise SystemExit(f"Cartella demo processate non trovata: {task_dir}")
-    if index is not None and first_k is not None:
-        raise SystemExit("Usa --index oppure --first-k, non entrambi.")
-    if index is not None:
-        fname = f"processed_{task}_{str(index).zfill(zfill)}.csv"
-        f = task_dir / fname
-        if not f.is_file():
-            raise SystemExit(f"Demo non trovata: {f}")
-        return [f]
-    pattern = re.compile(rf"^processed_{re.escape(task)}_(\d+)\.csv$")
-    files = sorted(p for p in task_dir.iterdir() if pattern.match(p.name))
-    if not files:
-        raise SystemExit(f"Nessuna demo processata trovata in {task_dir}")
-    if first_k is not None:
-        if first_k <= 0:
-            raise SystemExit("--first-k deve essere > 0.")
-        if first_k > len(files):
-            raise SystemExit(
-                f"--first-k={first_k} ma sono disponibili solo {len(files)} demo in {task_dir}."
-            )
-        files = files[:first_k]
-    return files
 
-
-# ---------------------------------------------------------------------------
-# Pipeline
-# ---------------------------------------------------------------------------
-def estimate_dt(t: np.ndarray) -> float:
-    """Stima dt da una time-grid uniforme; verifica l'uniformita'."""
-    if len(t) < 2:
-        raise ValueError("Demo troppo corta per stimare dt (N<2).")
-    diffs = np.diff(t)
-    dt = float(np.mean(diffs))
-    if dt <= 0.0:
-        raise ValueError(f"dt non positivo ({dt}); time-grid non valida.")
-    if not np.allclose(diffs, dt, rtol=DT_RTOL, atol=1e-6):
-        spread = float(np.max(diffs) - np.min(diffs))
-        raise ValueError(
-            f"Time-grid non uniforme: dt_mean={dt:.6f}, spread={spread:.2e}. "
-            "Atteso input dalla common-preprocessing su griglia uniforme."
-        )
-    return dt
-
-
-def finite_diff_derivatives(y: np.ndarray, dt: float):
-    """yd e ydd via differenze finite centrate (np.gradient, edge_order=2)."""
-    dy = np.gradient(y, dt, axis=0, edge_order=2)
-    ddy = np.gradient(dy, dt, axis=0, edge_order=2)
-    return dy, ddy
-
-
-def save_inspection_csv(out_path: Path, t: np.ndarray, y: np.ndarray,
-                        dy: np.ndarray, ddy: np.ndarray,
-                        grip: np.ndarray) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(INSPECTION_HEADER)
-        for i in range(len(t)):
-            w.writerow([
-                f"{t[i]:.9f}",
-                *(f"{v:.9f}" for v in y[i]),
-                *(f"{v:.9f}" for v in dy[i]),
-                *(f"{v:.9f}" for v in ddy[i]),
-                f"{grip[i]:.9f}",
-            ])
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Pre-processing DMP-specifico (derivate).")
-    p.add_argument("--task", required=True, help="Nome primitiva (es. pick, place, pour).")
-    p.add_argument("--index", type=int, default=None,
-                   help="Processa solo la demo con questo indice. Se omesso, le processa tutte.")
-    p.add_argument("--first-k", type=int, default=None,
-                   help="Usa solo le prime K demo (in ordine alfabetico). Mutualmente esclusivo con --index.")
-    p.add_argument("--in-root", type=Path, default=PREPROCESSED_ROOT,
-                   help=f"Root delle demo gia' pre-processate (default: {PREPROCESSED_ROOT}).")
-    p.add_argument("--out-root", type=Path, default=DMP_PREPROCESSED_ROOT,
-                   help=f"Root di output (default: {DMP_PREPROCESSED_ROOT}).")
-    p.add_argument("--zfill", type=int, default=2, help="Zero-padding indice (default: 2).")
-    p.add_argument("--no-inspection-csv", action="store_true",
-                   help="Non salvare i CSV per-demo per ispezione visiva.")
-    return p.parse_args()
-
-
-def main() -> int:
-    args = parse_args()
-    inputs = collect_inputs(args.in_root, args.task, args.index, args.zfill,
-                            first_k=args.first_k)
-    out_dir = args.out_root / args.task
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"DMP preprocessing su {len(inputs)} demo per '{args.task}'")
-    print(f"  in : {args.in_root / args.task}")
-    print(f"  out: {out_dir}")
-
-    Y_list, dY_list, ddY_list = [], [], []
-    t_list, grip_list = [], []
-    durations, n_per_demo = [], []
-    y0_list, g_list = [], []
-    demo_names = []
-    dt_values = []
-
-    for f in inputs:
-        t, y, grip = load_processed_csv(f)
-        dt = estimate_dt(t)
-        dy, ddy = finite_diff_derivatives(y, dt)
-
-        Y_list.append(y)
-        dY_list.append(dy)
-        ddY_list.append(ddy)
-        t_list.append(t)
-        grip_list.append(grip)
-        durations.append(float(t[-1] - t[0]))
-        n_per_demo.append(len(t))
-        y0_list.append(y[0].copy())
-        g_list.append(y[-1].copy())
-        demo_names.append(f.name)
-        dt_values.append(dt)
-
-        if not args.no_inspection_csv:
-            ins_path = out_dir / f.name.replace("processed_", "dmp_processed_")
-            save_inspection_csv(ins_path, t, y, dy, ddy, grip)
-            print(f"  {f.name} -> {ins_path.name}  "
-                  f"(N={len(t)}, T={durations[-1]:.2f}s, dt={dt:.4f}s)")
-        else:
-            print(f"  {f.name}  (N={len(t)}, T={durations[-1]:.2f}s, dt={dt:.4f}s)")
-
-    # dt unico (tutte le demo passano da common-preprocessing con stesso dt).
-    dt_arr = np.asarray(dt_values, float)
-    if not np.allclose(dt_arr, dt_arr[0], rtol=DT_RTOL, atol=1e-6):
-        print(
-            f"  [warn] dt non costante tra le demo: min={dt_arr.min():.6f}, "
-            f"max={dt_arr.max():.6f}. Salvo dt_mean."
-        )
-    dt_out = float(dt_arr.mean())
-
-    out_npz = out_dir / f"{args.task}_dmp_dataset.npz"
-    np.savez(
-        out_npz,
-        # liste per-demo (object-arrays: lunghezze potenzialmente diverse)
-        Y_list=np.array(Y_list, dtype=object),
-        dY_list=np.array(dY_list, dtype=object),
-        ddY_list=np.array(ddY_list, dtype=object),
-        t_list=np.array(t_list, dtype=object),
-        grip_list=np.array(grip_list, dtype=object),
-        # endpoints per-demo (matrici regolari)
-        y0_list=np.asarray(y0_list, dtype=float),     # (K, 6)
-        g_list=np.asarray(g_list, dtype=float),       # (K, 6)
-        # metadati
-        dt=dt_out,
-        T_list=np.asarray(durations, dtype=float),
-        T_mean=float(np.mean(durations)),
-        demo_lengths=np.asarray(n_per_demo, dtype=int),
-        demo_files=np.asarray(demo_names),
-        y_columns=np.asarray(Y_COLS),
-    )
-    print(f"\nDataset DMP salvato: {out_npz}")
-    print(f"  K_demos={len(inputs)}  |  dt={dt_out:.4f}s  |  T_mean={np.mean(durations):.3f}s")
-    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
+
+
+
+
+
