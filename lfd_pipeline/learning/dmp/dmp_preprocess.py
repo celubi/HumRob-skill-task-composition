@@ -112,7 +112,7 @@ def quat_log_map(q: np.ndarray, tol=1e-6):
     theta = np.arctan2(v_norm, w_clipped)
 
     if theta < tol:
-        return np.array([0, 0, 0])
+        return np.zeros(3, dtype=float)
     
     n = v / v_norm
 
@@ -296,7 +296,7 @@ def main():
             process_demo_file(args, file, index)
     else:
         file = files_path[int(args.index)]
-        process_demo_file(args, file, args.index)
+        process_demo_file(args, file, int(args.index))
 
     
 
